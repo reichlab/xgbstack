@@ -1,0 +1,16 @@
+Package: xgbstack
+Title: Flexible model stacking via gradient boosting for models that output predictive distributions.
+Version: 0.0.0.9000
+Authors@R: person("Evan", "Ray", , "elray@umass.edu", c("aut", "cre"))
+Description: Flexible model stacking via gradient boosting for models that output predictive distributions.
+Depends:
+    R (>= 3.0.2)
+Imports:
+    xgboost
+License: What license is it under?
+LazyData: true
+Suggests:
+    knitr,
+    testthat
+VignetteBuilder: knitr
+RoxygenNote: 5.0.1
