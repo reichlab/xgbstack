@@ -43,51 +43,89 @@ softmax <- function(x) {
   return(exp(x - log_denom))
 }
 
-## objective function for call to xgboost to do estimation of model weights
-## actually only calculate gradient and (diagonal elements of) Hessian
-test_obj <- function(preds, dtrain) {
-  ## Convert "preds" to weights.
-  ## From line 56 at https://github.com/dmlc/xgboost/blob/ef4dcce7372dbc03b5066a614727f2a6dfcbd3bc/src/objective/multiclass_obj.cc,
-  ## it appears that preds is stored in column-major order with
-  ## observations in columns and classes/models in rows
-  ## i.e., preds[k * nclass + i] is prediction for model i at index k
-  ## (note that our use of i and k is exactly reversed from theirs)
-  
-  ## first, convert preds to matrix
-  ## calculate num_obs like this instead of storing since num_obs depends on
-  ## the value of subsample argument to xgb.train
-  num_models <- get("num_models", envir = storage_env)
+#' take preds, a vector in 
+## From line 56 at https://github.com/dmlc/xgboost/blob/ef4dcce7372dbc03b5066a614727f2a6dfcbd3bc/src/objective/multiclass_obj.cc,
+## it appears that preds is stored in column-major order with
+## observations in columns and classes/models in rows
+## i.e., preds[k * nclass + i] is prediction for model i at index k
+## (note that our use of i and k is exactly reversed from theirs)
+## first, convert preds to matrix
+## calculate num_obs like this instead of storing since num_obs depends on
+## the value of subsample argument to xgb.train
+#' 
+#' @return preds in matrix form, with num_models columns and num_obs rows
+preds_to_matrix <- function(preds, num_models) {
   num_obs <- length(preds) / num_models
   dim(preds) <- c(num_models, num_obs)
+  return(t(preds))
+}
+
+#' A factory-esque arrangement to manufacture an objective function with
+#' needed quantities accessible in its parent environment.
+get_obj_fn <- function(component_model_log_scores) {
+  ## evaluate arguments so that they're not just empty promises
+  component_model_log_scores
   
-  weights <- matrix(NA, nrow = num_models, ncol = num_obs)
-  for(k in seq_len(num_obs)) {
-    weights[, k] <- softmax(preds[, k])
+  ## create function to calculate objective
+  obj_fn <- function(preds, dtrain) {
+    ## convert preds to matrix form with one row per observation and one column per component model
+    preds <- preds_to_matrix(preds = preds, num_models = ncol(component_model_log_scores))
+    
+    log_weights_denom <- logspace_sum_matrix_rows(preds)
+    
+    log_weights <- sweep(preds, 1, log_weights_denom, `-`)
+    
+    ## adding log_weights and component_model_log_scores gets
+    ## log(pi_mi) + log(f_m(y_i | x_i)) = log(pi_mi * f_m(y_i | x_i))
+    ## in cell [i, m] of the result.  logspace sum the rows to get a vector with
+    ## log(sum_m pi_mi * f_m(y_i | x_i)) in position i.
+    ## sum that vector to get the objective.
+    return(sum(logspace_sum_matrix_rows(log_weights + component_model_log_scores)))
   }
   
-  ## calculate preliminary quantities used in both grad and hess
-  prelim_quantities <- calc_obj_prelim()
-  
-  ## calculate gradient
-  grad <- calc_obj_grad()
-  
-  ## calculate Hessian
-  ## Based on lines 66 - 71 of https://github.com/dmlc/xgboost/blob/ef4dcce7372dbc03b5066a614727f2a6dfcbd3bc/src/objective/multiclass_obj.cc#L5
-  ## it looks like we only need the diagonal elements of the Hessian
-  hess <- calc_obj_hess()
-  
-  # return
-  return(list(grad = grad, hess = hess))
+  ## return function to calculate objective
+  return(obj_fn)
 }
 
-calc_obj_prelim <- function() {
+#' A factory-esque arrangement to manufacture an function to calculate first and
+#' second order derivatives of the objective function, with
+#' needed quantities accessible in its parent environment.
+get_obj_deriv_fn <- function(component_model_log_scores) {
+  ## evaluate arguments so that they're not just empty promises
+  component_model_log_scores
   
-}
-
-calc_obj_grad <- function() {
+  ## create function to calculate objective
+  obj_deriv_fn <- function(preds, dtrain) {
+    ## convert preds to matrix form with one row per observation and one column per component model
+    preds <- preds_to_matrix(preds = preds, num_models = ncol(component_model_log_scores))
+    
+    log_weights <- sweep(preds, 1, logspace_sum_matrix_rows(preds), `-`)
+    
+    ## adding preds and component_model_log_scores gets
+    ## log(pi_mi) + log(f_m(y_i | x_i)) = log(pi_mi * f_m(y_i | x_i))
+    ## in cell [i, m] of the result.  logspace sum the rows to get a vector with
+    ## log(sum_m pi_mi * f_m(y_i | x_i)) in position i.
+    ## sum that vector to get the objective.
+    log_weighted_scores <- log_weights + component_model_log_scores
+    log_weighted_score_sums <- logspace_sum_matrix_rows(log_weighted_scores)
+    
+    ## calculate gradient
+    ## is there a way to do exponentiation last in the lines below,
+    ## instead of in the calculations of term1 and term2?
+    ## think i may need to vectorize logspace_sub?
+    grad_term1 <- exp(sweep(log_weighted_scores, 1, log_weighted_score_sums, `-`))
+    grad_term2 <- exp(log_weights)
+    grad <- grad_term1 - grad_term2
+    grad <- as.vector(t(grad))
+    
+    ## calculate hessian
+    hess <- grad_term1 - grad_term1^2 - grad_term2 + grad_term2^2
+    hess <- as.vector(t(hess))
+    
+    ## return
+    return(list(grad = grad, hess = hess))
+  }
   
-}
-
-calc_obj_hess <- function() {
-  
+  ## return function to calculate derivatives of objective
+  return(obj_deriv_fn)
 }
