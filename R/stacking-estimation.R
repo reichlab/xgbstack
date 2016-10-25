@@ -58,6 +58,8 @@ preds_to_matrix <- function(preds, num_models) {
   num_obs <- length(preds) / num_models
   dim(preds) <- c(num_models, num_obs)
   return(t(preds))
+#  dim(preds) <- c(num_obs, num_models)
+#  return(preds)
 }
 
 #' A factory-esque arrangement to manufacture an objective function with
@@ -80,7 +82,7 @@ get_obj_fn <- function(component_model_log_scores) {
     ## in cell [i, m] of the result.  logspace sum the rows to get a vector with
     ## log(sum_m pi_mi * f_m(y_i | x_i)) in position i.
     ## sum that vector to get the objective.
-    return(sum(logspace_sum_matrix_rows(log_weights + component_model_log_scores)))
+    return(-1 * sum(logspace_sum_matrix_rows(log_weights + component_model_log_scores)))
   }
   
   ## return function to calculate objective
@@ -116,14 +118,18 @@ get_obj_deriv_fn <- function(component_model_log_scores) {
     grad_term1 <- exp(sweep(log_weighted_scores, 1, log_weighted_score_sums, `-`))
     grad_term2 <- exp(log_weights)
     grad <- grad_term1 - grad_term2
+#    print(grad)
     grad <- as.vector(t(grad))
+#    grad <- as.vector(grad)
     
     ## calculate hessian
     hess <- grad_term1 - grad_term1^2 - grad_term2 + grad_term2^2
     hess <- as.vector(t(hess))
+#    hess <- as.vector(hess)
     
     ## return
-    return(list(grad = grad, hess = hess))
+    return(list(grad = -1 * grad, hess = -1 * hess))
+#    return(list(grad = grad, hess = hess))
   }
   
   ## return function to calculate derivatives of objective

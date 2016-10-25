@@ -48,7 +48,7 @@ test_that("objective works", {
     
     temp <- apply(model_weights * scores, 1, sum)
 
-    return(sum(log(temp)))
+    return(-1 * sum(log(temp)))
   }
   
   preds <- runif(300, -5, 5)
