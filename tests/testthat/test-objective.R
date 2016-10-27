@@ -4,6 +4,23 @@ library(xgboost)
 
 context("objective function gradient and (diagonal elements of) hessian")
 
+## make up some data for purposes of the unit tests
+## 3 models: "a", "b", "c"
+component_models <- letters[1:3]
+
+set.seed(9873)
+loso_pred_res <- data.frame(
+  model = paste0("log_score_", rep(letters[1:3], each = 100)),
+  d = rep(1:100, times = 3),
+  loso_log_score = c(
+    log(runif(100, 0, 1)), # model a's performance not related to d
+    sort(log(runif(100, 0, 1))), # model b's performance increasing in d
+    rep(-0.5, 100))  # model c's performance constant
+) %>%
+  spread(model, loso_log_score)
+
+preds <- runif(300, -5, 5)
+
 test_that("objective works", {
   ## although the objective is only used for unit testing,
   ## need to make sure it's right!
@@ -11,27 +28,11 @@ test_that("objective works", {
   ## stable calculations, but is less intuitive.
   ## Here I implement the objective function again, less stably but more intuitively.
   
-  
-  ### For now, let's just make up some data for the purposes of method development
-  ### this will need to go into test code too
-  component_models <- letters[1:3]
-  
-  set.seed(9873)
-  loso_pred_res <- data.frame(
-    model = paste0("log_score_", rep(letters[1:3], each = 100)),
-    d = rep(1:100, times = 3),
-    loso_log_score = c(
-      log(runif(100, 0, 1)), # model a's performance not related to d
-      sort(log(runif(100, 0, 1))), # model b's performance increasing in d
-      rep(-0.5, 100))  # model c's performance constant
-  ) %>%
-    spread(model, loso_log_score)
-  
   obj_fn <- get_obj_fn(component_model_log_scores =
-                         as.matrix(
-                           loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
-                         ) %>%
-                         `storage.mode<-`("double"))
+    as.matrix(
+      loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
+    ) %>%
+      `storage.mode<-`("double"))
   
   manual_obj_fn <- function(preds, component_model_log_scores) {
     ## convert preds to matrix form with one row per observation and one column per component model
@@ -50,7 +51,6 @@ test_that("objective works", {
     return(-1 * sum(log(temp)))
   }
   
-  preds <- runif(300, -5, 5)
   package_result <- obj_fn(preds)
   manual_result <- manual_obj_fn(preds = preds,
     component_model_log_scores =
@@ -64,21 +64,6 @@ test_that("objective works", {
 
 
 test_that("objective gradient works", {
-  ### For now, let's just make up some data for the purposes of method development
-  ### this will need to go into test code too
-  component_models <- letters[1:3]
-  
-  set.seed(9873)
-  loso_pred_res <- data.frame(
-    model = paste0("log_score_", rep(letters[1:3], each = 100)),
-    d = rep(1:100, times = 3),
-    loso_log_score = c(
-      log(runif(100, 0, 1)), # model a's performance not related to d
-      sort(log(runif(100, 0, 1))), # model b's performance increasing in d
-      rep(-0.5, 100))  # model c's performance constant
-  ) %>%
-    spread(model, loso_log_score)
-  
   obj_fn <- get_obj_fn(component_model_log_scores =
     as.matrix(
       loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
@@ -86,12 +71,11 @@ test_that("objective gradient works", {
       `storage.mode<-`("double"))
   
   obj_deriv_fn <- get_obj_deriv_fn(component_model_log_scores =
-                         as.matrix(
-                           loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
-                         ) %>%
-                         `storage.mode<-`("double"))
+    as.matrix(
+      loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
+    ) %>%
+    `storage.mode<-`("double"))
   
-  preds <- runif(300, -5, 5)
   calc_obj_deriv <- obj_deriv_fn(preds)
   
   obj_fn_wrapper <- function(val, ind, preds) {
@@ -109,28 +93,12 @@ test_that("objective gradient works", {
 
 
 test_that("objective gradient works", {
-  ### For now, let's just make up some data for the purposes of method development
-  ### this will need to go into test code too
-  component_models <- letters[1:3]
-  
-  set.seed(9873)
-  loso_pred_res <- data.frame(
-    model = paste0("log_score_", rep(letters[1:3], each = 100)),
-    d = rep(1:100, times = 3),
-    loso_log_score = c(
-      log(runif(100, 0, 1)), # model a's performance not related to d
-      sort(log(runif(100, 0, 1))), # model b's performance increasing in d
-      rep(-0.5, 100))  # model c's performance constant
-  ) %>%
-    spread(model, loso_log_score)
-  
   obj_deriv_fn <- get_obj_deriv_fn(component_model_log_scores =
-                                     as.matrix(
-                                       loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
-                                     ) %>%
-                                     `storage.mode<-`("double"))
+    as.matrix(
+      loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
+    ) %>%
+    `storage.mode<-`("double"))
   
-  preds <- runif(300, -5, 5)
   calc_obj_deriv <- obj_deriv_fn(preds)
   
   obj_deriv_wrapper <- function(val, ind, preds) {
