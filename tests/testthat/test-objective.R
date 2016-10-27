@@ -1,7 +1,6 @@
 library(tidyr)
 library(dplyr)
 library(xgboost)
-source("R/stacking-estimation.R") # only temporary
 
 context("objective function gradient and (diagonal elements of) hessian")
 

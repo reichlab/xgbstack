@@ -92,9 +92,8 @@ Now, we calculate the second order derivative as
 library(tidyr)
 library(dplyr)
 library(xgboost)
-library(kcde) # for logspace arithmetic, only temporary
+library(xgbstack)
 library(ggplot2)
-source("R/stacking-estimation.R") # only temporary
 
 ### For now, let's just make up some data for the purposes of method development
 ### this will need to go into test code too
