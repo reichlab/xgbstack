@@ -1,69 +1,37 @@
 ### Estimate function that gives model weights based on observed inputs
 
-### WE CAN DROP THE INDEX j FROM DISCUSSION HERE, SUMMING BINS ELSEWHERE
-
-### MAKE MATH IN VIGNETTE
-
-### Objective function to maximize is the log score:
-### sum_k log{sum_j prob(bin_kj)} = sum_k log{sum_j sum_i w_ik prob_i(bin_kj)}
-###   = sum_k log[sum_i  w_ik * {sum_j prob_i(bin_kj)}]     (1)
-### k indexes combinations of time at which a prediction is made,
-### j indexes the bins adjacent to the observed bin, used in calculating log scores, and
-### i indexes the component models;
-### prob_i(bin_kj) denotes the probability assigned to bin j at time(s) k by model i.
-### w_ik is the weight assigned to model i for observation k, computed as
-### w_ik = exp(rho_ik)/(sum_i' exp(rho_i'k)), where
-### rho_ik is a function of covariates observed for observation k
-### time a prediction is for (which may be each week within the season or just the season)
-
-### In practice, we will implement the calculation of (1) using the logspace summation operator:
-### logsum_i a_i = log(sum_i exp(a_i))
-### With this notation, continuing from (1), we have
-###  (1) = sum_k logsum_i log[w_ik * {sum_j prob_i(bin_kj)}]
-###  = sum_k logsum_i [log(w_ik) + log{sum_j prob_i(bin_kj)}]
-###  = sum_k logsum_i [log(w_ik) + logsum_j log{prob_i(bin_kj)}].
-### Further, we compute log(w_ik) = log[exp(rho_ik)/{sum_i' exp(rho_i'k)}]
-###  = log{exp(rho_ik)} - log{sum_i' exp(rho_i'k)}
-###  = rho_ik - (logsum_i' rho_i'k)
-
-### We also need to calculate the first and second order derivatives of the
-### loss function with respect to the predicted values (rho_ik) at each observation
-### (e.g., see https://www.r-bloggers.com/an-introduction-to-xgboost-r-package/
-### https://github.com/dmlc/xgboost/blob/ef4dcce7372dbc03b5066a614727f2a6dfcbd3bc/src/objective/multiclass_obj.cc
-### https://github.com/dmlc/xgboost/tree/ef4dcce7372dbc03b5066a614727f2a6dfcbd3bc/plugin/example)
-### There is a separate gradient calculation for each pair of indices k and i
-### in Equation (1)
-### partial term_k / partial rho_ik
-###  = 
-
-
-
-softmax <- function(x) {
-  log_denom <- logspace_sum(x)
-  return(exp(x - log_denom))
-}
-
-#' take preds, a vector in 
-## From line 56 at https://github.com/dmlc/xgboost/blob/ef4dcce7372dbc03b5066a614727f2a6dfcbd3bc/src/objective/multiclass_obj.cc,
-## it appears that preds is stored in column-major order with
-## observations in columns and classes/models in rows
-## i.e., preds[k * nclass + i] is prediction for model i at index k
-## (note that our use of i and k is exactly reversed from theirs)
-## first, convert preds to matrix
-## calculate num_obs like this instead of storing since num_obs depends on
-## the value of subsample argument to xgb.train
+#' Convert vector of predictions to matrix format
+#' From line 56 at https://github.com/dmlc/xgboost/blob/ef4dcce7372dbc03b5066a614727f2a6dfcbd3bc/src/objective/multiclass_obj.cc,
+#' it appears that preds is stored in column-major order with
+#' observations in columns and classes/models in rows
+#' i.e., preds[k * nclass + i] is prediction for model i at index k
+#' 
+#' @param preds vector of predictions as obtained from xgb.train
+#' @param number of models
 #' 
 #' @return preds in matrix form, with num_models columns and num_obs rows
 preds_to_matrix <- function(preds, num_models) {
   num_obs <- length(preds) / num_models
   dim(preds) <- c(num_models, num_obs)
   return(t(preds))
-#  dim(preds) <- c(num_obs, num_models)
-#  return(preds)
 }
 
-#' A factory-esque arrangement to manufacture an objective function with
-#' needed quantities accessible in its parent environment.
+#' A factory-esque arrangement (not sure if there is an actual name for this
+#' pattern) to manufacture an objective function with needed quantities
+#' accessible in its parent environment.  We do this becaues there's no way to
+#' use the info attribute of the dtrain object to store the component model
+#' log scores (as would be standard in the xgboost package).  But we need to
+#' ensure that the objective function has access to these log scores when
+#' called in parallel.
+#' 
+#' @param component_model_log_scores N by M matrix where entry [i, m] has the
+#'   log-score for observation i obtained from component model m
+#' 
+#' @return a function that takes two arguments (preds and dtrain) and computes
+#'   the log-score objective function for the stacked model.  i.e., it converts
+#'   preds to model weights for each component model m at each observation i
+#'   and then combines the component model log scores with those weights to
+#'   obtain stacked model log scores
 get_obj_fn <- function(component_model_log_scores) {
   ## evaluate arguments so that they're not just empty promises
   component_model_log_scores
@@ -89,9 +57,26 @@ get_obj_fn <- function(component_model_log_scores) {
   return(obj_fn)
 }
 
-#' A factory-esque arrangement to manufacture an function to calculate first and
-#' second order derivatives of the objective function, with
-#' needed quantities accessible in its parent environment.
+#' A factory-esque arrangement (not sure if there is an actual name for this
+#' pattern) to manufacture an function to calculate first and second order
+#' derivatives of the log-score objective, with needed quantities
+#' accessible in its parent environment.  We do this becaues there's no way to
+#' use the info attribute of the dtrain object to store the component model
+#' log scores (as would be standard in the xgboost package).  But we need to
+#' ensure that the objective function has access to these log scores when
+#' called in parallel.
+#' 
+#' @param component_model_log_scores N by M matrix where entry [i, m] has the
+#'   log-score for observation i obtained from component model m
+#' 
+#' @return a function that takes two arguments (preds and dtrain) and computes
+#'   the first and second order derivatives of the log-score objective function
+#'   for the stacked model.  i.e., it converts preds to model weights for each
+#'   component model m at each observation i and then combines the component
+#'   model log scores with those weights to obtain stacked model log scores.
+#'   See the package vignette for derivations of these calculations.  This
+#'   function is suitable for use as the "obj" function in a call to
+#'   xgboost::xgb.train
 get_obj_deriv_fn <- function(component_model_log_scores) {
   ## evaluate arguments so that they're not just empty promises
   component_model_log_scores
@@ -118,18 +103,14 @@ get_obj_deriv_fn <- function(component_model_log_scores) {
     grad_term1 <- exp(sweep(log_weighted_scores, 1, log_weighted_score_sums, `-`))
     grad_term2 <- exp(log_weights)
     grad <- grad_term1 - grad_term2
-#    print(grad)
     grad <- as.vector(t(grad))
-#    grad <- as.vector(grad)
-    
+
     ## calculate hessian
     hess <- grad_term1 - grad_term1^2 - grad_term2 + grad_term2^2
     hess <- as.vector(t(hess))
-#    hess <- as.vector(hess)
-    
+
     ## return
     return(list(grad = -1 * grad, hess = -1 * hess))
-#    return(list(grad = grad, hess = hess))
   }
   
   ## return function to calculate derivatives of objective
