@@ -110,21 +110,10 @@ loso_pred_res <- data.frame(
 
 ## Obtain stacking model fit
 fit <- xgbstack(log_score_a + log_score_b + log_score_c ~ d,
-  data = loso_pred_res)
+  data = loso_pred_res,
+  nrounds = 1000)
 
-## Let's see what the model weights look like as a function of d
-
-## Get predictions -- need to refactor this into a user-friendly method
-## Create some test data
-dtest <- xgb.DMatrix(
-  data = as.matrix(1:100) %>%
-      `storage.mode<-`("double")
-  )
-
-predictions <- predict(fit, newdata = dtest)
-
-preds <- preds_to_matrix(preds = predictions, num_models = 3)
-
+## Make a plot
 component_model_scores_df <- as.data.frame(as.matrix(
       loso_pred_res[, paste0("log_score_", letters[1:3]), drop = FALSE]
     ) %>%
@@ -133,12 +122,10 @@ component_model_scores_df <- as.data.frame(as.matrix(
   gather_("model", "score", letters[1:3]) %>%
   mutate(d = rep(1:100, 3))
 
-## Convert predictions to model weights -- refactor
-log_denom <- logspace_sum_matrix_rows(preds)
-component_model_weights_df <- as.data.frame(exp(sweep(preds, 1, log_denom, `-`))) %>%
-  `colnames<-`(letters[1:3])
-
-component_model_weights_df <- component_model_weights_df %>%
+component_model_weights_df <-
+  compute_model_weights(fit, newdata = data.frame(d = 1:100), log = FALSE) %>%
+  as.data.frame() %>%
+  `colnames<-`(letters[1:3]) %>%
   gather_("model", "weight", letters[1:3]) %>%
   mutate(d = rep(1:100, 3))
 

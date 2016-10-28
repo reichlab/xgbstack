@@ -16,6 +16,53 @@ preds_to_matrix <- function(preds, num_models) {
   return(t(preds))
 }
 
+#' Function to compute (log) weights of component models from the "predictions"
+#' output by xgboost
+#' 
+#' @param preds predictions from xgboost in matrix form, with num_models columns
+#'   and num_obs rows
+#' @param log boolean; return log of component model weights or just the weights
+#' 
+#' @return a matrix with num_models columns and num_obs rows, with (log) weight
+#'   for model m at observation i in entry [i, m]
+compute_model_weights_from_preds <- function(preds, log = FALSE) {
+  log_weights <- sweep(preds, 1, logspace_sum_matrix_rows(preds), `-`)
+  
+  if(log) {
+    return(log_weights)
+  } else {
+    return(exp(log_weights))
+  }
+}
+
+#' Compute (log) weights of component models based on an xgbstack fit and
+#' new data.
+#' 
+#' @param xgbstack_fit a fit xgbstack object
+#' @param newdata new x data
+#' @param log boolean: return log of weights or original weights?
+#' 
+#' @return an n_obs by num_models matrix of (log) weights
+compute_model_weights <- function(xgbstack_fit, newdata, log = FALSE) {
+  if(!identical(class(xgbstack_fit), "xgbstack")) {
+    stop("xgbstack_fit must be an object of type xgbstack!")
+  }
+  
+  ## convert newdata to format used in xgboost
+  newdata_matrix <- Formula::model.part(xgbstack_fit$formula, data = newdata, rhs = 1) %>%
+    as.matrix() %>%
+    `storage.mode<-`("double")
+  newdata <- xgb.DMatrix(data = newdata_matrix)
+  
+  ## get something proportional to log(weights)
+  xgb_fit <- xgb.load(xgbstack_fit$fit)
+  preds <- predict(xgb_fit, newdata = newdata)
+  
+  ## convert to and return weights
+  preds <- preds_to_matrix(preds, num_models = xgbstack_fit$num_models)
+  return(compute_model_weights_from_preds(preds, log = log))
+}
+
 #' A factory-esque arrangement (not sure if there is an actual name for this
 #' pattern) to manufacture an objective function with needed quantities
 #' accessible in its parent environment.  We do this becaues there's no way to
@@ -41,9 +88,8 @@ get_obj_fn <- function(component_model_log_scores) {
     ## convert preds to matrix form with one row per observation and one column per component model
     preds <- preds_to_matrix(preds = preds, num_models = ncol(component_model_log_scores))
     
-    log_weights_denom <- logspace_sum_matrix_rows(preds)
-    
-    log_weights <- sweep(preds, 1, log_weights_denom, `-`)
+    ## Compute log of component model weights at each observation
+    log_weights <- compute_model_weights_from_preds(preds, log = TRUE)
     
     ## adding log_weights and component_model_log_scores gets
     ## log(pi_mi) + log(f_m(y_i | x_i)) = log(pi_mi * f_m(y_i | x_i))
@@ -86,7 +132,8 @@ get_obj_deriv_fn <- function(component_model_log_scores) {
     ## convert preds to matrix form with one row per observation and one column per component model
     preds <- preds_to_matrix(preds = preds, num_models = ncol(component_model_log_scores))
     
-    log_weights <- sweep(preds, 1, logspace_sum_matrix_rows(preds), `-`)
+    ## Compute log of component model weights at each observation
+    log_weights <- compute_model_weights_from_preds(preds, log = TRUE)
     
     ## adding preds and component_model_log_scores gets
     ## log(pi_mi) + log(f_m(y_i | x_i)) = log(pi_mi * f_m(y_i | x_i))
@@ -128,7 +175,7 @@ get_obj_deriv_fn <- function(component_model_log_scores) {
 #' 
 #' @return an estimated xgbstack object, which contains a gradient tree boosted
 #'   fit mapping observed variables to component model weights
-xgbstack <- function(formula, data) {
+xgbstack <- function(formula, data, nrounds = 10) {
   formula <- Formula::Formula(formula)
   
   ## response, as a matrix of type double
@@ -158,11 +205,16 @@ xgbstack <- function(formula, data) {
       num_class = ncol(model_scores)
     ),
     data = dtrain,
-    nrounds = 1000,
+    nrounds = nrounds,
     obj = obj_deriv_fn,
     verbose = 0
   )
   
-  ## return -- should really return an object with call, formula, etc.
-  return(fit)
+  ## return
+  return(structure(
+      list(fit = xgb.save.raw(fit),
+        formula = formula,
+        num_models = ncol(model_scores)),
+      class = "xgbstack"
+    ))
 }
