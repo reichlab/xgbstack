@@ -116,3 +116,53 @@ get_obj_deriv_fn <- function(component_model_log_scores) {
   ## return function to calculate derivatives of objective
   return(obj_deriv_fn)
 }
+
+#' Fit a stacking model given a measure of performance for each component model
+#' on a set of training data, and a set of covariates to use in forming
+#' component model weights
+#' 
+#' @param formula a formula describing the model fit.  left hand side should
+#'   give columns in data with scores of models, separated by +.  right hand
+#'   side should specify explanatory variables.
+#' @data a data frame with variables in formula
+#' 
+#' @return an estimated xgbstack object, which contains a gradient tree boosted
+#'   fit mapping observed variables to component model weights
+xgbstack <- function(formula, data) {
+  formula <- Formula::Formula(formula)
+  
+  ## response, as a matrix of type double
+  model_scores <- Formula::model.part(formula, data = data, lhs = 1) %>%
+    as.matrix() %>%
+    `storage.mode<-`("double")
+  
+  ## predictors, in format used in xgboost
+  dtrain <- xgb.DMatrix(
+    data = Formula::model.part(formula, data = data, rhs = 1) %>%
+      as.matrix() %>%
+      `storage.mode<-`("double")
+  )
+  
+  ## get a function to compute first and second order derivatives of objective
+  ## function
+  obj_deriv_fn <- get_obj_deriv_fn(component_model_log_scores = model_scores)
+  
+  fit <- xgb.train(
+    params = list(
+      booster = "gbtree", # change to gblinear to fit lines
+      subsample = 1, # use half of the observations in each boosting iteration
+      colsample_bytree = 1, # use all of the columns to do prediction (for now, only one column...)
+      max_depth = 10,
+      min_child_weight = 0,
+      gamma = 0,
+      num_class = ncol(model_scores)
+    ),
+    data = dtrain,
+    nrounds = 1000,
+    obj = obj_deriv_fn,
+    verbose = 0
+  )
+  
+  ## return -- should really return an object with call, formula, etc.
+  return(fit)
+}

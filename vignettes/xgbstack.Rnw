@@ -108,76 +108,32 @@ loso_pred_res <- data.frame(
 ) %>%
   spread(model, loso_log_score)
 
-# ggplot(loso_pred_res) + geom_point(aes(x = d, y = loso_log_score, colour = model, group = model))
+## Obtain stacking model fit
+fit <- xgbstack(log_score_a + log_score_b + log_score_c ~ d,
+  data = loso_pred_res)
 
-## convert training data to format used in xgboost
-## refactor this into part of fit method eventually
-component_models <- letters[1:3]
-predictive_vars <- "d"
-dtrain <- xgb.DMatrix(
-  data = as.matrix(loso_pred_res[, predictive_vars, drop = FALSE]) %>%
-    `storage.mode<-`("double"))
+## Let's see what the model weights look like as a function of d
 
-### call xbg.train to do estimation.
-### refactor this to be part of fit method eventually.
-obj_deriv_fn <- get_obj_deriv_fn(component_model_log_scores = as.matrix(
-      loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
-    ) %>%
-    `storage.mode<-`("double"))
+## Get predictions -- need to refactor this into a user-friendly method
+## Create some test data
+dtest <- xgb.DMatrix(
+  data = as.matrix(1:100) %>%
+      `storage.mode<-`("double")
+  )
 
-# fit_1round <- xgb.train(
-#   params = list(
-#     booster = "gbtree", # change to gblinear to fit lines
-#     subsample = 1, # use half of the observations in each boosting iteration
-#     colsample_bytree = 1, # use all of the columns to do prediction (for now, only one column...)
-#     max_depth = 10,
-#     gamma = 0,
-#     num_class = length(component_models)
-#   ),
-#   data = dtrain,
-#   nrounds = 1,
-#   obj = obj_deriv_fn,
-#   verbose = 2
-# )
-# 
-# predictions_1round <- predict(fit_1round, newdata = dtrain)
-# 
-# preds_1round <- preds_to_matrix(preds = predictions_1round, num_models = length(component_models))
-# 
-# 
-# debug(obj_deriv_fn)
-fit <- xgb.train(
-  params = list(
-    booster = "gbtree", # change to gblinear to fit lines
-    subsample = 1, # use half of the observations in each boosting iteration
-    colsample_bytree = 1, # use all of the columns to do prediction (for now, only one column...)
-    max_depth = 10,
-    min_child_weight = 0,
-    gamma = 0,
-    num_class = length(component_models)
-  ),
-  data = dtrain,
-  nrounds = 1000,
-  obj = obj_deriv_fn,
-  verbose = 0
-)
+predictions <- predict(fit, newdata = dtest)
 
-#xgb.plot.tree("d", model = fit)
-
-predictions <- predict(fit, newdata = dtrain)
-
-preds <- preds_to_matrix(preds = predictions, num_models = length(component_models))
-#dim(preds) <- rev(dim(preds))
-#preds <- t(preds)
+preds <- preds_to_matrix(preds = predictions, num_models = 3)
 
 component_model_scores_df <- as.data.frame(as.matrix(
-      loso_pred_res[, paste0("log_score_", component_models), drop = FALSE]
+      loso_pred_res[, paste0("log_score_", letters[1:3]), drop = FALSE]
     ) %>%
     `storage.mode<-`("double")) %>%
   `colnames<-`(letters[1:3]) %>%
   gather_("model", "score", letters[1:3]) %>%
   mutate(d = rep(1:100, 3))
 
+## Convert predictions to model weights -- refactor
 log_denom <- logspace_sum_matrix_rows(preds)
 component_model_weights_df <- as.data.frame(exp(sweep(preds, 1, log_denom, `-`))) %>%
   `colnames<-`(letters[1:3])
@@ -189,154 +145,6 @@ component_model_weights_df <- component_model_weights_df %>%
 ggplot() +
   geom_point(aes(x = d, y = score, colour = model), data = component_model_scores_df) +
   geom_point(aes(x = d, y = weight, colour = model), shape = 15, data = component_model_weights_df)
-@
-
-<<>>=
-xgb.plot.tree <-
-function (feature_names = NULL, filename_dump = NULL, model = NULL, 
-    n_first_tree = NULL, CSSstyle = NULL, width = NULL, height = NULL) 
-{
-    if (!(class(CSSstyle) %in% c("character", "NULL") && length(CSSstyle) <= 
-        1)) {
-        stop("style: Has to be a character vector of size 1.")
-    }
-    if (!class(model) %in% c("xgb.Booster", "NULL")) {
-        stop("model: Has to be an object of class xgb.Booster model generaged by the xgb.train function.")
-    }
-    if (!requireNamespace("DiagrammeR", quietly = TRUE)) {
-        stop("DiagrammeR package is required for xgb.plot.tree", 
-            call. = FALSE)
-    }
-    if (is.null(model)) {
-        allTrees <- xgb.model.dt.tree(feature_names = feature_names, 
-            filename_dump = filename_dump, n_first_tree = n_first_tree)
-    }
-    else {
-        allTrees <- xgb.model.dt.tree(feature_names = feature_names, 
-            model = model, n_first_tree = n_first_tree)
-    }
-    allTrees[Feature != "Leaf", `:=`(yesPath, paste(ID, "(", 
-        Feature, "<br/>Cover: ", Cover, "<br/>Gain: ", Quality, 
-        ")-->|< ", Split, "|", Yes, ">", Yes.Feature, "]", sep = ""))]
-    allTrees[Feature != "Leaf", `:=`(noPath, paste(ID, "(", Feature, 
-        ")-->|>= ", Split, "|", No, ">", No.Feature, "]", sep = ""))]
-    if (is.null(CSSstyle)) {
-        CSSstyle <- "classDef greenNode fill:#A2EB86, stroke:#04C4AB, stroke-width:2px;classDef redNode fill:#FFA070, stroke:#FF5E5E, stroke-width:2px"
-    }
-    yes <- allTrees[Feature != "Leaf", c(Yes)] %>% paste(collapse = ",") %>% 
-        paste("class ", ., " greenNode", sep = "")
-    no <- allTrees[Feature != "Leaf", c(No)] %>% paste(collapse = ",") %>% 
-        paste("class ", ., " redNode", sep = "")
-    path <- allTrees[Feature != "Leaf", c(yesPath, noPath)] %>% 
-        .[order(.)] %>% paste(sep = "", collapse = ";") %>% paste("graph LR", 
-        ., collapse = "", sep = ";") %>% paste(CSSstyle, yes, 
-        no, sep = ";")
-    DiagrammeR::mermaid(path, width, height)
-}
-
-xgb.model.dt.tree <-
-function (feature_names = NULL, filename_dump = NULL, model = NULL, 
-    text = NULL, n_first_tree = NULL) 
-{
-    if (!class(feature_names) %in% c("character", "NULL")) {
-        stop("feature_names: Has to be a vector of character or NULL if the model dump already contains feature name. Look at this function documentation to see where to get feature names.")
-    }
-    if (!(class(filename_dump) %in% c("character", "NULL") && 
-        length(filename_dump) <= 1)) {
-        stop("filename_dump: Has to be a character vector of size 1 representing the path to the model dump file.")
-    }
-    else if (!is.null(filename_dump) && !file.exists(filename_dump)) {
-        stop("filename_dump: path to the model doesn't exist.")
-    }
-    else if (is.null(filename_dump) && is.null(model) && is.null(text)) {
-        stop("filename_dump & model & text: no path to dump model, no model, no text dump, have been provided.")
-    }
-    if (!class(model) %in% c("xgb.Booster", "NULL")) {
-        stop("model: Has to be an object of class xgb.Booster model generaged by the xgb.train function.")
-    }
-    if (!class(text) %in% c("character", "NULL")) {
-        stop("text: Has to be a vector of character or NULL if a path to the model dump has already been provided.")
-    }
-    if (!class(n_first_tree) %in% c("numeric", "NULL") | length(n_first_tree) > 
-        1) {
-        stop("n_first_tree: Has to be a numeric vector of size 1.")
-    }
-    if (!is.null(model)) {
-        text = xgb.dump(model = model, with.stats = T)
-    }
-    else if (!is.null(filename_dump)) {
-        text <- readLines(filename_dump) %>% str_trim(side = "both")
-    }
-    position <- str_match(text, "booster") %>% is.na %>% not %>% 
-        which %>% c(length(text) + 1)
-    extract <- function(x, pattern) str_extract(x, pattern) %>% 
-        str_split("=") %>% lapply(function(x) x[2] %>% as.numeric) %>% 
-        unlist
-    n_round <- min(length(position) - 1, n_first_tree)
-    addTreeId <- function(x, i) paste(i, x, sep = "-")
-    allTrees <- data.table()
-    anynumber_regex <- "[-+]?[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?"
-    for (i in 1:n_round) {
-        tree <- text[(position[i] + 1):(position[i + 1] - 1)]
-        if (length(tree) < 2) 
-            next
-        treeID <- i - 1
-        notLeaf <- str_match(tree, "leaf") %>% is.na
-        leaf <- notLeaf %>% not %>% tree[.]
-        branch <- notLeaf %>% tree[.]
-        idBranch <- str_extract(branch, "\\d*:") %>% str_replace(":", 
-            "") %>% addTreeId(treeID)
-        idLeaf <- str_extract(leaf, "\\d*:") %>% str_replace(":", 
-            "") %>% addTreeId(treeID)
-        featureBranch <- str_extract(branch, "f\\d*<") %>% str_replace("<", 
-            "") %>% str_replace("f", "") %>% as.numeric
-        if (!is.null(feature_names)) {
-            featureBranch <- feature_names[featureBranch + 1]
-        }
-        featureLeaf <- rep("Leaf", length(leaf))
-        splitBranch <- str_extract(branch, paste0("<", anynumber_regex, 
-            "\\]")) %>% str_replace("<", "") %>% str_replace("\\]", 
-            "")
-        splitLeaf <- rep(NA, length(leaf))
-        yesBranch <- extract(branch, "yes=\\d*") %>% addTreeId(treeID)
-        yesLeaf <- rep(NA, length(leaf))
-        noBranch <- extract(branch, "no=\\d*") %>% addTreeId(treeID)
-        noLeaf <- rep(NA, length(leaf))
-        missingBranch <- extract(branch, "missing=\\d+") %>% 
-            addTreeId(treeID)
-        missingLeaf <- rep(NA, length(leaf))
-        qualityBranch <- extract(branch, paste0("gain=", anynumber_regex))
-        qualityLeaf <- extract(leaf, paste0("leaf=", anynumber_regex))
-        coverBranch <- extract(branch, "cover=\\d*\\.*\\d*")
-        coverLeaf <- extract(leaf, "cover=\\d*\\.*\\d*")
-        dt <- data.table(ID = c(idBranch, idLeaf), Feature = c(featureBranch, 
-            featureLeaf), Split = c(splitBranch, splitLeaf), 
-            Yes = c(yesBranch, yesLeaf), No = c(noBranch, noLeaf), 
-            Missing = c(missingBranch, missingLeaf), Quality = c(qualityBranch, 
-                qualityLeaf), Cover = c(coverBranch, coverLeaf))[order(ID)][, 
-            `:=`(Tree, treeID)]
-        allTrees <- rbindlist(list(allTrees, dt), use.names = T, 
-            fill = F)
-    }
-    yes <- allTrees[!is.na(dt$Yes), dt$Yes]
-    set(allTrees, i = which(allTrees[, Feature] != "Leaf"), j = "Yes.Feature", 
-        value = allTrees[ID %in% yes, Feature])
-    set(allTrees, i = which(allTrees[, Feature] != "Leaf"), j = "Yes.Cover", 
-        value = allTrees[ID %in% yes, Cover])
-    set(allTrees, i = which(allTrees[, Feature] != "Leaf"), j = "Yes.Quality", 
-        value = allTrees[ID %in% yes, Quality])
-    no <- allTrees[!is.na(No), No]
-    set(allTrees, i = which(allTrees[, Feature] != "Leaf"), j = "No.Feature", 
-        value = allTrees[ID %in% no, Feature])
-    set(allTrees, i = which(allTrees[, Feature] != "Leaf"), j = "No.Cover", 
-        value = allTrees[ID %in% no, Cover])
-    set(allTrees, i = which(allTrees[, Feature] != "Leaf"), j = "No.Quality", 
-        value = allTrees[ID %in% no, Quality])
-    allTrees
-}
-
-xgb.plot.tree("d", model = fit)
-
 @
 
 \end{document}
