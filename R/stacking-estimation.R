@@ -58,9 +58,16 @@ compute_model_weights <- function(xgbstack_fit, newdata, log = FALSE) {
   xgb_fit <- xgb.load(xgbstack_fit$fit)
   preds <- predict(xgb_fit, newdata = newdata)
   
-  ## convert to and return weights
+  ## convert to weights
   preds <- preds_to_matrix(preds, num_models = xgbstack_fit$num_models)
-  return(compute_model_weights_from_preds(preds, log = log))
+  model_weights <- compute_model_weights_from_preds(preds, log = log)
+  
+  ## set column names
+  colnames(model_weights) <-
+    strsplit(as.character(xgbstack_fit$formula)[2], " + ", fixed = TRUE)[[1]]
+  
+  ## return
+  return(model_weights)
 }
 
 #' A factory-esque arrangement (not sure if there is an actual name for this
