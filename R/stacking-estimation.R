@@ -130,9 +130,12 @@ get_obj_fn <- function(component_model_log_scores) {
 #'   See the package vignette for derivations of these calculations.  This
 #'   function is suitable for use as the "obj" function in a call to
 #'   xgboost::xgb.train
-get_obj_deriv_fn <- function(component_model_log_scores) {
+get_obj_deriv_fn <- function(component_model_log_scores, dtrain_Rmatrix) {
   ## evaluate arguments so that they're not just empty promises
   component_model_log_scores
+  if(!missing(dtrain_Rmatrix)) {
+    dtrain_Rmatrix
+  }
   
   ## create function to calculate objective
   obj_deriv_fn <- function(preds, dtrain) {
@@ -182,7 +185,13 @@ get_obj_deriv_fn <- function(component_model_log_scores) {
 #' 
 #' @return an estimated xgbstack object, which contains a gradient tree boosted
 #'   fit mapping observed variables to component model weights
-xgbstack <- function(formula, data, nrounds = 10) {
+xgbstack <- function(formula,
+  data,
+  min_child_weight = 0,
+  gamma = 0,
+  lambda = 0,
+  nrounds = 10,
+  nthread) {
   formula <- Formula::Formula(formula)
   
   ## response, as a matrix of type double
@@ -191,26 +200,32 @@ xgbstack <- function(formula, data, nrounds = 10) {
     `storage.mode<-`("double")
   
   ## predictors, in format used in xgboost
+  dtrain_Rmatrix <- Formula::model.part(formula, data = data, rhs = 1) %>%
+    as.matrix() %>%
+    `storage.mode<-`("double")
   dtrain <- xgb.DMatrix(
-    data = Formula::model.part(formula, data = data, rhs = 1) %>%
-      as.matrix() %>%
-      `storage.mode<-`("double")
+    data = dtrain_Rmatrix
   )
   
   ## get a function to compute first and second order derivatives of objective
   ## function
-  obj_deriv_fn <- get_obj_deriv_fn(component_model_log_scores = model_scores)
+  obj_deriv_fn <- get_obj_deriv_fn(component_model_log_scores = model_scores, dtrain_Rmatrix = dtrain_Rmatrix)
   
+  params <- list(
+    booster = "gbtree", # change to gblinear to fit lines
+    subsample = 1, # use half of the observations in each boosting iteration
+    colsample_bytree = 1, # use all of the columns to do prediction (for now, only one column...)
+    max_depth = 10,
+    min_child_weight = min_child_weight,
+    gamma = gamma,
+    lambda = gamma,
+    num_class = ncol(model_scores)
+  )
+  if(!missing(nthread)) {
+    params$nthread <- nthread
+  }
   fit <- xgb.train(
-    params = list(
-      booster = "gbtree", # change to gblinear to fit lines
-      subsample = 1, # use half of the observations in each boosting iteration
-      colsample_bytree = 1, # use all of the columns to do prediction (for now, only one column...)
-      max_depth = 10,
-      min_child_weight = 0,
-      gamma = 0,
-      num_class = ncol(model_scores)
-    ),
+    params = params,
     data = dtrain,
     nrounds = nrounds,
     obj = obj_deriv_fn,
