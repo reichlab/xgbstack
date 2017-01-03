@@ -180,8 +180,40 @@ get_obj_deriv_fn <- function(component_model_log_scores, dtrain_Rmatrix) {
 #' 
 #' @param formula a formula describing the model fit.  left hand side should
 #'   give columns in data with scores of models, separated by +.  right hand
-#'   side should specify explanatory variables.
-#' @data a data frame with variables in formula
+#'   side should specify explanatory variables on which weights will depend.
+#' @param data a data frame with variables in formula
+#' @param booster what form of boosting to use? see xgboost documentation
+#' @param subsample fraction of data to use in bagging.  not supported yet.
+#' @param colsample_bytree fraction of explanatory variables to randomly select
+#'   in growing each regression tree. see xgboost documentation
+#' @param colsample_bylevel fraction of explanatory variables to randomly select
+#'   in growing each level of the regression tree. see xgboost documentation
+#' @param max_depth maximum depth of regression trees. see xgboost documentation
+#' @param min_child_weight not recommended for use. see xgboost documentation
+#' @param eta learning rate. see xgboost documentation
+#' @param gamma Penalty on number of regression tree leafs. see xgboost documentation
+#' @param lambda L2 regularization of contribution to model weights in each
+#'   round. see xgboost documentation
+#' @param alpha L1 regularization of contribution to model weights in each round.
+#'   see xgboost documentation
+#' @param nrounds see xgboost documentation
+#' @param cv_params optional named list of parameter values to evaluate loss
+#'   via cross-validation. Each component is a vector of parameter values with
+#'   name one of "booster", "subsample", "colsample_bytree",
+#'   "colsample_bylevel", "max_depth", "min_child_weight", "eta", "gamma",
+#'    "lambda", "alpha", "nrounds"
+#' @param cv_folds list specifying observation groups to use in cross-validation
+#'   each list component is a numeric vector of observation indices.
+#' @param cv_nfolds integer specifying the number of cross-validation folds to
+#'   use.  if cv_folds was provided, cv_nfolds is ignored.  if cv_folds was not
+#'   provided, the data will be randomly partitioned into cv_nfolds groups
+#' @param cv_refit character describing which of the models specified by the
+#'   values in cv_params to refit using the full data set. Either "best",
+#'   "ttest", or "none".
+#' @param update an object of class xgbstack to update
+#' @param nthread number of threads to use
+#' @param verbose how much output to generate along the way. 0 for no logging,
+#'   1 for some logging
 #' 
 #' @return an estimated xgbstack object, which contains a gradient tree boosted
 #'   fit mapping observed variables to component model weights
@@ -190,15 +222,21 @@ xgbstack <- function(formula,
   booster = "gbtree",
   subsample = 1,
   colsample_bytree = 1,
-  max_depth = 10,
+  colsample_bylevel = 1,
+  max_depth = 6,
   min_child_weight = -10^10,
+  eta = 0.3,
   gamma = 0,
   lambda = 0,
+  alpha = 0,
   nrounds = 10,
   cv_params = NULL,
   cv_folds = NULL,
   cv_nfolds = 10L,
-  nthread) {
+  cv_refit = "ttest",
+  update = NULL,
+  nthread = NULL,
+  verbose = 0) {
   formula <- Formula::Formula(formula)
   
   ## response, as a matrix of type double
@@ -214,27 +252,81 @@ xgbstack <- function(formula,
     data = dtrain_Rmatrix
   )
   
+  ## process the update argument
+  update_same_data_and_cv <- FALSE
+  if(!is.null(update)) {
+    if(!identical(class(update, "xgbstack"))) {
+      stop("Argument update must be an object of class xgbstack.")
+    }
+    
+    if(identical(formula, update$formula) &&
+        identical(model_scores, update$model_scores) &&
+        identical(dtrain_Rmatrix, update$dtrain_Rmatrix)) {
+      ## data from update is same as data provided now
+      if(!is.null(cv_params)) {
+        ## was provided cv_folds/cv_nfolds same as update$cv_folds?
+        if(!missing(cv_folds) && !is.null(cv_folds)) {
+          if(identical(cv_folds, update$cv_folds)) {
+            update_same_data_and_cv <- TRUE
+            cv_nfolds <- length(cv_folds)
+          }
+        } else if(!missing(cv_nfolds) && !is.null(cv_nfolds)) {
+          if(identical(as.integer(cv_nfolds, length(update$cv_folds)))) {
+            update_same_data_and_cv <- TRUE
+            cv_folds <- update$cv_folds
+          }
+        } else {
+          ## did not provide cv_folds or cv_nfolds, reuse values from update
+          update_same_data_and_cv <- TRUE
+          cv_folds <- update$cv_folds
+          cv_nfolds <- length(update$cv_folds)
+        }
+      }
+    }
+  }
+  
+  ## base parameter values -- defaults or specified by arguments to this function
+  ## if cv_params were provided, base_params will be overridden by cv_params
   base_params <- list(
     booster = booster,
     subsample = subsample,
     colsample_bytree = colsample_bytree,
+    colsample_bylevel = colsample_bylevel,
     max_depth = max_depth,
     min_child_weight = min_child_weight,
+    eta = eta,
     gamma = gamma,
     lambda = lambda,
+    alpha = alpha,
+    nrounds = nrounds,
     num_class = ncol(model_scores)
   )
-  if(!missing(nthread)) {
-    base_params$nthread <- nthread
+  if(!missing(nthread) && !is.null(nthread)) {
+    base_params$nthread <- as.integer(nthread)
   }
+  
+  ## function to calculate grad and hess of objective function based on
+  ## full data set.  used in fitting gradient tree boosted models below
+  obj_deriv_fn <- get_obj_deriv_fn(
+    component_model_log_scores = model_scores,
+    dtrain_Rmatrix = dtrain_Rmatrix)
+  
   
   if(is.null(cv_params)) {
     ## no cross-validation for parameter selection
     ## use base_params
     params <- base_params
+    
+    ## get fit with all training data based on provided parameters
+    fit <- xgb.train(
+      params = params,
+      data = dtrain,
+      nrounds = nrounds,
+      obj = obj_deriv_fn,
+      verbose = 0
+    )
   } else {
     ## estimation of some parameters via cross validation was specified
-    cv_results <- expand.grid(cv_params, stringsAsFactors = TRUE)
     
     ## if they weren't provided, get sets of observations for cv folds
     ## otherwise, set cv_nfolds = number of folds provided
@@ -251,13 +343,30 @@ xgbstack <- function(formula,
       cv_nfolds <- length(cv_folds)
     }
     
+    ## construct data frame with all combinations of parameter value settings
+    combined_params <- c(
+      base_params[!(names(base_params) %in% names(cv_params))],
+      cv_params)[names(base_params)]
+    cv_results <- expand.grid(combined_params, stringsAsFactors = FALSE)
+    
+    ## if update was provided, subset to only rows specifying new parameter
+    ## combinations (don't re-estimate cv results already in update)
+    if(update_same_data_and_cv) {
+      cv_results <- cv_results %>%
+        anti_join(update$cv_results, by = names(base_params))
+    }
+    
+    ## space for cv results
+    cv_results <- cbind(cv_results,
+      matrix(NA, nrow = nrow(cv_results), ncol = cv_nfolds + 1) %>%
+        `colnames<-`(
+          c(paste0("cv_log_score_fold_", seq_len(cv_nfolds)), "cv_log_score_mean")
+        )
+    )
+    
     ## if nrounds is a parameter to choose by cross-validation,
     ## only fit the models with largest number of nrounds,
     ## then get predictions with fewer rounds by using ntreelimit argument
-    cv_results <- cbind(cv_results,
-      matrix(NA, nrow = nrow(cv_results), ncol = cv_nfolds) %>%
-        `colnames<-`(paste0("cv_log_score_fold_", seq_len(cv_nfolds)))
-    )
     if("nrounds" %in% names(cv_params)) {
       model_inds_to_fit <- which(cv_results$nrounds == max(cv_params$nrounds))
     } else {
@@ -271,15 +380,29 @@ xgbstack <- function(formula,
       params <- c(params,
         base_params[!(names(base_params) %in% names(params))])
       
+      if(verbose >= 1) {
+        message(paste0("Fitting cv model ",
+          which(model_inds_to_fit == cv_ind),
+          " of ",
+          length(model_inds_to_fit),
+          ".  Parameters are: ",
+          paste0(names(unlist(params[seq_along(base_params)])),
+            " = ",
+            unlist(params[seq_along(base_params)]),
+            collapse = "; ")
+        ))
+      }
+      
       ## get all rows for parameter combinations where everything other than
       ## nrounds matches what is in the current set of parameters
       if("nrounds" %in% names(cv_params)) {
         if(length(cv_params) == 1) {
           similar_param_rows <- seq_len(nrow(cv_results))
         } else {
+          cols_to_examine <- which(names(base_params) != "nrounds")
           similar_param_rows <- which(sapply(seq_len(nrow(cv_results)),
             function(possible_ind) {
-              all(cv_results[possible_ind, -(colnames(cv_results) == "nrounds")] == cv_results[cv_ind, -(colnames(cv_results) == "nrounds")], na.rm = TRUE)
+              all(cv_results[possible_ind, cols_to_examine] == cv_results[cv_ind, cols_to_examine], na.rm = TRUE)
             }
           ))
         }
@@ -331,47 +454,98 @@ xgbstack <- function(formula,
       } # end code to get log score for each k-fold
     } # end code to get log score for each parameter combination
     
-    cv_results$cv_log_score <- apply(cv_results[, paste0("cv_log_score_fold_", seq_len(cv_nfolds))], 1, sum)
+    cv_results$cv_log_score_mean <- apply(cv_results[, paste0("cv_log_score_fold_", seq_len(cv_nfolds))], 1, mean)
+    cv_results$cv_log_score_sd <- apply(cv_results[, paste0("cv_log_score_fold_", seq_len(cv_nfolds))], 1, sd)
     
-    ## best ind has highest log score
-    ## (see comment about multiplication by -1 above)
-    best_params_ind <- which.max(cv_results$cv_log_score)
+    ## if update was provided, merge cv_results with previous cv_results
+    if(update_same_data_and_cv) {
+      cv_results <- cv_results %>%
+        bind_rows(update$cv_results)
+    }
     
-    params <- cv_results[best_params_ind, seq_len(ncol(cv_results) - cv_nfolds - 1)]
-    attr(params, "out.attrs") <- NULL
-    params <- as.list(params)
-    params <- c(params,
-      base_params[!(names(base_params) %in% names(params))])
+    ## get fit with all training data based on selected parameters
+    if(identical(cv_refit, "best")) {
+      ## fit based on the single set of parameter values with best performance
+      ## best ind has highest log score
+      ## (see comment about multiplication by -1 above)
+      best_params_ind <- which.max(cv_results$cv_log_score_mean)
+      
+      params <- cv_results[best_params_ind, seq_len(ncol(cv_results) - cv_nfolds - 1)]
+      attr(params, "out.attrs") <- NULL
+      params <- as.list(params)
+      params <- c(params,
+        base_params[!(names(base_params) %in% names(params))])
+      
+      fit <- xgb.train(
+        params = params,
+        data = dtrain,
+        nrounds = nrounds,
+        obj = obj_deriv_fn,
+        verbose = 0
+      ) %>%
+        xgb.save.raw()
+    } else if(identical(cv_refit, "ttest")) {
+      ## fits based on all sets of parameter values with cv performance
+      ## within 1 sd of the cv performance of the best parameter set
+      ## best ind has highest log score
+      ## (see comment about multiplication by -1 above)
+      best_params_ind <- which.max(cv_results$cv_log_score_mean)
+      refit_params_inds <- sapply(seq_len(nrow(cv_results)),
+        function(ind) {
+          t.test(
+            x = as.numeric(cv_results[ind, paste0("cv_log_score_fold_", seq_len(cv_nfolds))]),
+            y = as.numeric(cv_results[best_params_ind, paste0("cv_log_score_fold_", seq_len(cv_nfolds))]),
+            paired = TRUE
+          )$p.value >= 0.05
+        })
+      refit_params_inds[best_params_ind] <- TRUE
+      
+      params <- cv_results[refit_params_inds, seq_len(ncol(cv_results) - cv_nfolds - 1)]
+      fit <- list()
+      for(single_params_ind in seq_len(nrow(params))) {
+        single_params <- params[single_params_ind, , drop = FALSE]
+        attr(single_params, "out.attrs") <- NULL
+        single_params <- as.list(single_params)
+        single_params <- c(single_params,
+          base_params[!(names(base_params) %in% names(single_params))])
+        
+        fit[[single_params_ind]] <- xgb.train(
+          params = single_params,
+          data = dtrain,
+          nrounds = nrounds,
+          obj = obj_deriv_fn,
+          verbose = 0
+        ) %>%
+          xgb.save.raw()
+      }
+    } else if(identical(cv_refit, "none")) {
+      fit <- NULL
+    } else {
+      warning("Invalid option for cv_refit: must be one of 'best', 'ttest', or 'none'; treating as 'none'")
+      fit <- NULL
+    }
   } # end code for cross-validation for parameter selection
-  
-  ## get fit with all training data based on selected parameters
-  obj_deriv_fn <- get_obj_deriv_fn(
-    component_model_log_scores = model_scores,
-    dtrain_Rmatrix = dtrain_Rmatrix)
-  
-  fit <- xgb.train(
-    params = params,
-    data = dtrain,
-    nrounds = nrounds,
-    obj = obj_deriv_fn,
-    verbose = 0
-  )
   
   ## return
   if(is.null(cv_params)) {
     return(structure(
-      list(fit = xgb.save.raw(fit),
+      list(fit = fit,
         formula = formula,
+        model_scores = model_scores,
+        dtrain_Rmatrix = dtrain_Rmatrix,
         params = params,
         num_models = ncol(model_scores)),
       class = "xgbstack"
     ))
   } else {
     return(structure(
-      list(fit = xgb.save.raw(fit),
+      list(fit = fit,
         formula = formula,
+        model_scores = model_scores,
+        dtrain_Rmatrix = dtrain_Rmatrix,
         params = params,
         num_models = ncol(model_scores),
+        cv_folds = cv_folds,
         cv_results = cv_results),
       class = "xgbstack"
     ))
