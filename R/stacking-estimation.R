@@ -40,10 +40,11 @@ compute_model_weights_from_preds <- function(preds, log = FALSE) {
 #' 
 #' @param xgbstack_fit a fit xgbstack object
 #' @param newdata new x data
+#' @param ntreelimit how many boosting iterations worth of trees to use
 #' @param log boolean: return log of weights or original weights?
 #' 
 #' @return an n_obs by num_models matrix of (log) weights
-compute_model_weights <- function(xgbstack_fit, newdata, log = FALSE) {
+compute_model_weights <- function(xgbstack_fit, newdata, ntreelimit, log = FALSE) {
   if(!identical(class(xgbstack_fit), "xgbstack")) {
     stop("xgbstack_fit must be an object of type xgbstack!")
   }
@@ -56,7 +57,11 @@ compute_model_weights <- function(xgbstack_fit, newdata, log = FALSE) {
   
   ## get something proportional to log(weights)
   xgb_fit <- xgb.load(xgbstack_fit$fit)
-  preds <- predict(xgb_fit, newdata = newdata)
+  if(missing(ntreelimit)) {
+    preds <- predict(xgb_fit, newdata = newdata)
+  } else {
+    preds <- predict(xgb_fit, ntreelimit = ntreelimit, newdata = newdata)
+  }
   
   ## convert to weights
   preds <- preds_to_matrix(preds, num_models = xgbstack_fit$num_models)
@@ -324,7 +329,8 @@ xgbstack <- function(formula,
       nrounds = nrounds,
       obj = obj_deriv_fn,
       verbose = 0
-    )
+    ) %>%
+      xgb.save.raw()
   } else {
     ## estimation of some parameters via cross validation was specified
     
