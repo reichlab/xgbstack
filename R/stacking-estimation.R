@@ -26,50 +26,158 @@ preds_to_matrix <- function(preds, num_models) {
 #' @return a matrix with num_models columns and num_obs rows, with (log) weight
 #'   for model m at observation i in entry [i, m]
 compute_model_weights_from_preds <- function(preds, log = FALSE) {
-  log_weights <- sweep(preds, 1, logspace_sum_matrix_rows(preds), `-`)
+  for(i in seq_len(nrow(preds))) {
+    preds[i, ] <- preds[i, ] - logspace_sum(preds[i, ])
+  }
   
   if(log) {
-    return(log_weights)
+    return(preds)
   } else {
-    return(exp(log_weights))
+    return(exp(preds))
   }
 }
 
 #' Compute (log) weights of component models based on an xgbstack fit and
 #' new data.
 #' 
+#' Format "complete" is only partially implemented.
+#' 
 #' @param xgbstack_fit a fit xgbstack object
 #' @param newdata new x data
 #' @param ntreelimit how many boosting iterations worth of trees to use
 #' @param log boolean: return log of weights or original weights?
+#' @param format string, either "bare" to return an nrow(newdata) by num_models
+#'   matrix of (log) weights, or "complete" to return a data frame with
+#'   nrow(newdata) times num_models data frame with both weights and log_weights
+#'   as well as parameter values and newdata
 #' 
-#' @return an n_obs by num_models matrix of (log) weights
-compute_model_weights <- function(xgbstack_fit, newdata, ntreelimit, log = FALSE) {
+#' @return (log) weights in the format determined by format
+#' 
+#' @export
+compute_model_weights <- function(
+  xgbstack_fit,
+  newdata,
+  ntreelimit,
+  log = FALSE,
+  format = "bare") {
   if(!identical(class(xgbstack_fit), "xgbstack")) {
     stop("xgbstack_fit must be an object of type xgbstack!")
   }
   
-  ## convert newdata to format used in xgboost
-  newdata_matrix <- Formula::model.part(xgbstack_fit$formula, data = newdata, rhs = 1) %>%
-    as.matrix() %>%
-    `storage.mode<-`("double")
-  newdata <- xgb.DMatrix(data = newdata_matrix)
-  
-  ## get something proportional to log(weights)
-  xgb_fit <- xgb.load(xgbstack_fit$fit)
-  if(missing(ntreelimit)) {
-    preds <- predict(xgb_fit, newdata = newdata)
+  if(identical(class(xgbstack_fit$fit), "raw")) {
+    ## fit is just one "raw" representation of a fit for a single parameter set
+    ## get weights from just that fit
+    
+    ## convert newdata to format used in xgboost
+    newdata_matrix <- Formula::model.part(xgbstack_fit$formula, data = newdata, rhs = 1) %>%
+      as.matrix() %>%
+      `storage.mode<-`("double")
+    newdata <- xgb.DMatrix(data = newdata_matrix)
+    
+    ## get something proportional to log(weights)
+    xgb_fit <- xgb.load(xgbstack_fit$fit)
+    if(missing(ntreelimit)) {
+      preds <- predict(xgb_fit, newdata = newdata)
+    } else {
+      preds <- predict(xgb_fit, ntreelimit = ntreelimit, newdata = newdata)
+    }
+    
+    ## convert to weights
+    preds <- preds_to_matrix(preds, num_models = xgbstack_fit$num_models)
+    model_weights <- compute_model_weights_from_preds(preds, log = log)
+    
+    ## set column names
+    colnames(model_weights) <-
+      strsplit(as.character(xgbstack_fit$formula)[2], " + ", fixed = TRUE)[[1]]
+    
+    if(identical(format, "complete")) {
+      stop("format complete is only partially implemented")
+      ## need to add params and newdata and gather current colnames(model_weights)
+    }
   } else {
-    preds <- predict(xgb_fit, ntreelimit = ntreelimit, newdata = newdata)
-  }
-  
-  ## convert to weights
-  preds <- preds_to_matrix(preds, num_models = xgbstack_fit$num_models)
-  model_weights <- compute_model_weights_from_preds(preds, log = log)
-  
-  ## set column names
-  colnames(model_weights) <-
-    strsplit(as.character(xgbstack_fit$formula)[2], " + ", fixed = TRUE)[[1]]
+    ## fit is a list of "raw" representations of fits for parameter sets in rows
+    ## of xgbstack_fit$params_refit
+    ## get weights from inidivual parameter sets in xgbstack_fit$params, and
+    ## a combination of those (on log scale)
+    
+    ## convert newdata to format used in xgboost
+    newdata_matrix <- Formula::model.part(xgbstack_fit$formula, data = newdata, rhs = 1) %>%
+      as.matrix() %>%
+      `storage.mode<-`("double")
+    newdata <- xgb.DMatrix(data = newdata_matrix)
+    
+    ## template with unique parameter sets for which we need to obtain weights
+    weights_template <- as.data.frame(xgbstack_fit$params)
+    
+    ## colnames of result are based on response variable names:
+    ## weights are assigned to models whose names are presumably encoded in the
+    ## response variable names
+    response_var_names <-
+      strsplit(as.character(xgbstack_fit$formula)[2], " + ", fixed = TRUE)[[1]]
+    
+    ## weights matrix that we will populate below
+    num_param_sets <- nrow(weights_template)
+    num_models <- length(response_var_names)
+    weights_combined <- matrix(NA, nrow = nrow(newdata_matrix), ncol = num_param_sets * num_models)
+    colnames(weights_combined) <- as.vector(outer(response_var_names, seq_len(num_param_sets),
+      function(response_var_name, param_set_ind) {
+        paste0(
+          response_var_name,
+          "_params_ind_",
+          param_set_ind
+        )
+      }))
+    
+    ## for each parameter set in weights_template, get corresponding weights
+    params_to_match_on <- c("booster", "subsample", "colsample_bytree",
+      "colsample_bylevel", "max_depth", "min_child_weight", "eta", "gamma",
+      "lambda", "alpha")
+    for(weights_ind in seq_len(nrow(weights_template))) {
+      message(paste0("param set ", weights_ind, " of ", nrow(weights_template), "\n"))
+      ## get the index of the fit to use: all params other than nrounds match
+      ## corresponding values in predictions_combined
+      fit_ind <- which(sapply(seq_len(nrow(xgbstack_fit$params_refit)),
+        function(refit_ind) {
+          all(weights_template[weights_ind, params_to_match_on] ==
+              xgbstack_fit$params_refit[refit_ind, params_to_match_on])
+        }))
+      
+      xgb_fit <- xgb.load(xgbstack_fit$fit[[fit_ind]])
+      preds <- predict(xgb_fit,
+        ntreelimit = weights_template$nrounds[weights_ind],
+        newdata = newdata)
+      
+      ## convert to weights
+      preds <- preds_to_matrix(preds, num_models = xgbstack_fit$num_models)
+      single_model_weights <- compute_model_weights_from_preds(preds, log = FALSE)
+      
+      ## add to combined weights data frame
+      inds <- seq(from = (weights_ind - 1) * num_models + 1, length = num_models)
+      weights_combined[, inds] <- single_model_weights
+    }
+    
+    ## get combined weights across all parameter sets, averaging on non-log scale
+    mean_weights_matrix <- matrix(
+      rep(diag(num_models) / num_param_sets, times = num_param_sets),
+      nrow = num_models * num_param_sets,
+      ncol = num_models,
+      byrow = TRUE)
+    model_weights <- cbind(
+      weights_combined,
+      (weights_combined %*% mean_weights_matrix) %>%
+        `colnames<-`(paste0(
+          response_var_names,
+          "_params_combined"
+        ))
+    )
+    if(log) {
+      model_weights <- log(model_weights)
+    }
+    
+    if(identical(format, "complete")) {
+      stop("format \"complete\" not yet implemented")
+    }
+  } # end conditioning on class(xgbstack_fit$fit)
   
   ## return
   return(model_weights)
@@ -222,6 +330,8 @@ get_obj_deriv_fn <- function(component_model_log_scores, dtrain_Rmatrix) {
 #' 
 #' @return an estimated xgbstack object, which contains a gradient tree boosted
 #'   fit mapping observed variables to component model weights
+#'   
+#' @export
 xgbstack <- function(formula,
   data,
   booster = "gbtree",
@@ -461,7 +571,7 @@ xgbstack <- function(formula,
     } # end code to get log score for each parameter combination
     
     cv_results$cv_log_score_mean <- apply(cv_results[, paste0("cv_log_score_fold_", seq_len(cv_nfolds))], 1, mean)
-    cv_results$cv_log_score_sd <- apply(cv_results[, paste0("cv_log_score_fold_", seq_len(cv_nfolds))], 1, sd)
+#    cv_results$cv_log_score_sd <- apply(cv_results[, paste0("cv_log_score_fold_", seq_len(cv_nfolds))], 1, sd)
     
     ## if update was provided, merge cv_results with previous cv_results
     if(update_same_data_and_cv) {
@@ -492,7 +602,8 @@ xgbstack <- function(formula,
         xgb.save.raw()
     } else if(identical(cv_refit, "ttest")) {
       ## fits based on all sets of parameter values with cv performance
-      ## within 1 sd of the cv performance of the best parameter set
+      ## not different from the cv performance of the best parameter set
+      ## according to a paired t test looking at results from all cv folds
       ## best ind has highest log score
       ## (see comment about multiplication by -1 above)
       best_params_ind <- which.max(cv_results$cv_log_score_mean)
@@ -504,12 +615,21 @@ xgbstack <- function(formula,
             paired = TRUE
           )$p.value >= 0.05
         })
-      refit_params_inds[best_params_ind] <- TRUE
+      ## NA's may result if CV prediction log scores are the same for the model
+      ## specified by ind as for the model specified by best_params_ind (and so
+      ## NA is guaranteed at at least the index of best_params_ind
+      refit_params_inds[is.na(refit_params_inds)] <- TRUE 
       
       params <- cv_results[refit_params_inds, seq_len(ncol(cv_results) - cv_nfolds - 1)]
+      ## only refit using the largest values of nrounds for each combination of
+      ## other parameter values
+      params_refit <- params %>%
+        group_by_(.dots = colnames(params)[colnames(params) != "nrounds"]) %>%
+        summarize(nrounds = max(nrounds)) %>%
+        as.data.frame()
       fit <- list()
-      for(single_params_ind in seq_len(nrow(params))) {
-        single_params <- params[single_params_ind, , drop = FALSE]
+      for(single_params_ind in seq_len(nrow(params_refit))) {
+        single_params <- params_refit[single_params_ind, , drop = FALSE]
         attr(single_params, "out.attrs") <- NULL
         single_params <- as.list(single_params)
         single_params <- c(single_params,
@@ -518,7 +638,7 @@ xgbstack <- function(formula,
         fit[[single_params_ind]] <- xgb.train(
           params = single_params,
           data = dtrain,
-          nrounds = nrounds,
+          nrounds = single_params$nrounds,
           obj = obj_deriv_fn,
           verbose = 0
         ) %>%
@@ -550,6 +670,11 @@ xgbstack <- function(formula,
         model_scores = model_scores,
         dtrain_Rmatrix = dtrain_Rmatrix,
         params = params,
+        params_refit = if(exists("params_refit")) {
+            params_refit
+          } else {
+            NULL
+          },
         num_models = ncol(model_scores),
         cv_folds = cv_folds,
         cv_results = cv_results),
